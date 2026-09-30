@@ -455,6 +455,58 @@ def load_template(name: str) -> str:
 # ==================== POPUP CONFIG ====================
 POPUP_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "popup_config.json")
 
+# ==================== INDIAN PAYMENT / STORE CONFIG ====================
+STORE_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "store_config.json")
+PAYMENT_REQUESTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "payment_requests.json")
+UPLOADS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
+DEFAULT_STORE_CONFIG = {
+    "upi_id": "yourupi@upi",
+    "payee_name": "AFREED LV UP",
+    "currency": "INR",
+    "plans": [
+        {"id": "starter", "name": "Starter", "price": 99, "account_limit": 1, "duration_value": 7, "duration_unit": "days"},
+        {"id": "pro", "name": "Pro", "price": 249, "account_limit": 3, "duration_value": 30, "duration_unit": "days"},
+        {"id": "ultra", "name": "Ultra", "price": 599, "account_limit": 10, "duration_value": 30, "duration_unit": "days"}
+    ],
+    "qr_path": ""
+}
+
+def _load_store_config():
+    if not os.path.exists(STORE_CONFIG_FILE):
+        return dict(DEFAULT_STORE_CONFIG)
+    try:
+        with open(STORE_CONFIG_FILE, "r", encoding="utf-8") as f:
+            data=json.load(f)
+        cfg=dict(DEFAULT_STORE_CONFIG)
+        if isinstance(data, dict):
+            cfg.update(data)
+        return cfg
+    except Exception:
+        return dict(DEFAULT_STORE_CONFIG)
+
+def _save_store_config(cfg):
+    os.makedirs(os.path.dirname(STORE_CONFIG_FILE), exist_ok=True)
+    tmp=STORE_CONFIG_FILE+".tmp"
+    with open(tmp,"w",encoding="utf-8") as f: json.dump(cfg,f,indent=2)
+    os.replace(tmp, STORE_CONFIG_FILE)
+
+def _load_payment_requests():
+    if not os.path.exists(PAYMENT_REQUESTS_FILE): return []
+    try:
+        with open(PAYMENT_REQUESTS_FILE,"r",encoding="utf-8") as f: data=json.load(f)
+        return data if isinstance(data,list) else []
+    except Exception: return []
+
+def _save_payment_requests(items):
+    tmp=PAYMENT_REQUESTS_FILE+".tmp"
+    with open(tmp,"w",encoding="utf-8") as f: json.dump(items,f,indent=2)
+    os.replace(tmp,PAYMENT_REQUESTS_FILE)
+
+def _safe_filename(name):
+    import re as _re
+    return _re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(name or "upload"))
+
+
 DEFAULT_POPUP = {
     "enabled": True,
     "header": "Important Update",
@@ -490,6 +542,134 @@ def _save_popup_config(cfg: Dict[str, Any]):
     except Exception as e:
         print(f"[POPUP] Save error: {e}")
 
+
+# ==================== STORE / PAYMENT API ====================
+async def handle_buy_page(request: web.Request) -> web.Response:
+    return web.Response(text=load_template("buy.html"), content_type="text/html", charset="utf-8")
+
+async def handle_upload(request: web.Request) -> web.StreamResponse:
+    name = _safe_filename(request.match_info.get("name", ""))
+    path = os.path.join(UPLOADS_DIR, name)
+    if not os.path.isfile(path):
+        raise web.HTTPNotFound()
+    return web.FileResponse(path)
+
+async def api_store_config(request: web.Request) -> web.Response:
+    cfg = _load_store_config()
+    return web.json_response({"status":"ok", "store": cfg})
+
+async def api_submit_payment(request: web.Request) -> web.Response:
+    try:
+        reader = await request.multipart()
+        fields = {}
+        screenshot = None
+        while True:
+            part = await reader.next()
+            if part is None: break
+            name = part.name or ""
+            if name == "screenshot":
+                raw = await part.read(decode=False)
+                if raw and len(raw) > 5 * 1024 * 1024:
+                    return _json_error("Screenshot must be 5 MB or smaller")
+                if raw:
+                    screenshot = raw
+            else:
+                fields[name] = (await part.text()).strip()
+
+        cfg = _load_store_config()
+        plan_id = fields.get("plan_id", "")
+        plan = next((x for x in cfg.get("plans", []) if str(x.get("id")) == plan_id), None)
+        if not plan: return _json_error("Invalid plan")
+        username = fields.get("username", "")
+        password = fields.get("password", "")
+        utr = fields.get("utr", "")
+        if len(username) < 3 or len(password) < 4:
+            return _json_error("Username/password is invalid")
+        if len(utr) < 6:
+            return _json_error("Enter the UTR / transaction reference")
+        if not screenshot:
+            return _json_error("Payment screenshot is required")
+
+        os.makedirs(UPLOADS_DIR, exist_ok=True)
+        req_id = secrets.token_hex(6).upper()
+        shot_name = f"payment_{req_id}.bin"
+        with open(os.path.join(UPLOADS_DIR, shot_name), "wb") as f: f.write(screenshot)
+        items = _load_payment_requests()
+        items.insert(0, {
+            "id": req_id, "created_at": time.time(), "status": "pending",
+            "plan_id": plan_id, "plan_name": plan.get("name", plan_id),
+            "price": float(plan.get("price", 0)), "account_limit": int(plan.get("account_limit", 1)),
+            "duration_value": int(plan.get("duration_value", 1)), "duration_unit": plan.get("duration_unit", "days"),
+            "username": username, "password": password, "utr": utr,
+            "screenshot": "/uploads/" + shot_name, "admin_note": ""
+        })
+        _save_payment_requests(items)
+        return web.json_response({"status":"ok", "request_id": req_id, "message":"Payment request submitted. Admin verification pending."})
+    except Exception as e:
+        return _json_error(str(e), 500)
+
+async def api_admin_store_config(request: web.Request) -> web.Response:
+    err = await _require_admin(request)
+    if err: return err
+    try:
+        data = await request.json()
+        cfg = _load_store_config()
+        cfg["upi_id"] = str(data.get("upi_id", cfg.get("upi_id", ""))).strip()
+        cfg["payee_name"] = str(data.get("payee_name", cfg.get("payee_name", ""))).strip()
+        plans = data.get("plans")
+        if isinstance(plans, list):
+            clean=[]
+            for i,p in enumerate(plans):
+                if not isinstance(p,dict): continue
+                try:
+                    price=float(p.get("price",0)); limit=int(p.get("account_limit",1)); dur=int(p.get("duration_value",1))
+                except Exception: continue
+                if price < 0 or limit < 1 or dur < 1: continue
+                unit=str(p.get("duration_unit","days"))
+                if unit not in ("minutes","hours","days"): unit="days"
+                clean.append({"id":str(p.get("id") or f"plan{i+1}"),"name":str(p.get("name") or f"Plan {i+1}"),"price":price,"account_limit":limit,"duration_value":dur,"duration_unit":unit})
+            if clean: cfg["plans"]=clean
+        _save_store_config(cfg)
+        return web.json_response({"status":"ok","store":cfg})
+    except Exception as e: return _json_error(str(e),500)
+
+async def api_admin_upload_qr(request: web.Request) -> web.Response:
+    err = await _require_admin(request)
+    if err: return err
+    try:
+        reader=await request.multipart(); part=await reader.next()
+        if not part or part.name != "qr": return _json_error("QR image required")
+        raw=await part.read(decode=False)
+        if not raw or len(raw)>2*1024*1024: return _json_error("QR image must be 2 MB or smaller")
+        os.makedirs(UPLOADS_DIR,exist_ok=True)
+        name=f"upi_qr_{int(time.time())}.png"
+        with open(os.path.join(UPLOADS_DIR,name),"wb") as f: f.write(raw)
+        cfg=_load_store_config(); cfg["qr_path"]="/uploads/"+name; _save_store_config(cfg)
+        return web.json_response({"status":"ok","qr_path":cfg["qr_path"]})
+    except Exception as e: return _json_error(str(e),500)
+
+async def api_admin_payment_requests(request: web.Request) -> web.Response:
+    err=await _require_admin(request)
+    if err: return err
+    return web.json_response({"status":"ok","requests":_load_payment_requests()})
+
+async def api_admin_payment_decision(request: web.Request) -> web.Response:
+    err=await _require_admin(request)
+    if err: return err
+    try:
+        data=await request.json(); req_id=str(data.get("request_id","")).strip(); decision=str(data.get("decision","")).lower(); note=str(data.get("note","")).strip()
+        if decision not in ("approve","reject"): return _json_error("Invalid decision")
+        items=_load_payment_requests(); item=next((x for x in items if x.get("id")==req_id),None)
+        if not item: return _json_error("Payment request not found",404)
+        if item.get("status") != "pending": return _json_error("Request already processed")
+        if decision=="reject":
+            item["status"]="rejected"; item["admin_note"]=note or "Payment not verified"; _save_payment_requests(items)
+            return web.json_response({"status":"ok","decision":"rejected"})
+        result=await create_user(item["username"],item["password"],item["account_limit"],item["duration_value"],item["duration_unit"])
+        if "error" in result: return _json_error(result["error"])
+        item["status"]="approved"; item["admin_note"]=note or "Payment verified"; item["approved_at"]=time.time(); _save_payment_requests(items)
+        return web.json_response({"status":"ok","decision":"approved","username":item["username"]})
+    except Exception as e: return _json_error(str(e),500)
 
 # ==================== PAGE ROUTES ====================
 async def handle_root(request: web.Request) -> web.Response:
@@ -1026,10 +1206,12 @@ async def api_public_stats(request: web.Request) -> web.Response:
 
 # ==================== SERVER START ====================
 async def start_web_dashboard(host: str = "0.0.0.0", port: int = 20331):
-    app = web.Application(client_max_size=4 * 1024 * 1024)
+    app = web.Application(client_max_size=8 * 1024 * 1024)
 
     # pages
     app.router.add_get("/", handle_root)
+    app.router.add_get("/buy", handle_buy_page)
+    app.router.add_get("/uploads/{name}", handle_upload)
     app.router.add_get("/login", handle_login_page)
     app.router.add_get("/admin-login", handle_admin_login_page)
     app.router.add_get("/admin", handle_admin_page)
@@ -1047,6 +1229,13 @@ async def start_web_dashboard(host: str = "0.0.0.0", port: int = 20331):
     app.router.add_post("/api/admin/extend-user", api_admin_extend_user)
     app.router.add_get("/api/admin/get-popup", api_admin_get_popup)
     app.router.add_post("/api/admin/save-popup", api_admin_save_popup)
+    app.router.add_get("/api/store", api_store_config)
+    app.router.add_post("/api/store/submit", api_submit_payment)
+    app.router.add_get("/api/admin/store", api_admin_store_config)
+    app.router.add_post("/api/admin/store", api_admin_store_config)
+    app.router.add_post("/api/admin/store/qr", api_admin_upload_qr)
+    app.router.add_get("/api/admin/payment-requests", api_admin_payment_requests)
+    app.router.add_post("/api/admin/payment-decision", api_admin_payment_decision)
 
     # user
     app.router.add_get("/api/user/stats", api_user_stats)
