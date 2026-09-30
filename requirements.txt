@@ -2,5 +2,6 @@ aiohttp
 google-play-scraper
 httpx
 protobuf
+protobuf-decoder
 requests
 pycryptodome
