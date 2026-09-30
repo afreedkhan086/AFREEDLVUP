@@ -702,12 +702,30 @@ def _build_user_accounts(username: str, user: Dict[str, Any]) -> List[Dict[str, 
                 merged["added_at"] = acc.get("added_at", bot_acc.get("added_at", now))
                 break
         if merged is None:
-            prog = calculate_level_progress(1, 0)
+            # The worker may have logged in successfully while the dashboard
+            # mapping has not caught up yet. Use the safe profile fields from
+            # the credential cache instead of showing a fake CONNECTING/level-1.
+            cached_profile = None
+            for c in list(candidates):
+                cred = bot_state.account_credentials.get(c)
+                if cred:
+                    cached_profile = cred
+                    break
+            prof_level = int((cached_profile or {}).get("level") or 1)
+            prof_exp = int((cached_profile or {}).get("exp") or 0)
+            prof_nick = (cached_profile or {}).get("nickname") or f"Player_{user_uid[:6]}"
+            prof_region = (cached_profile or {}).get("region") or "BD"
+            prof_likes = int((cached_profile or {}).get("likes") or 0)
+            prog = calculate_level_progress(prof_level, prof_exp)
             merged = {
-                "uid": user_uid, "display_uid": user_uid, "actual_uid": user_uid,
-                "user_input_uid": user_uid, "nickname": f"Player_{user_uid[:6]}",
-                "region": "BD", "level": 1, "initial_exp": 0, "current_exp": 0,
-                "gained_exp": 0, "likes": 0, "status": "CONNECTING", "matches_played": 0,
+                "uid": str((cached_profile or {}).get("account_id") or user_uid),
+                "display_uid": str((cached_profile or {}).get("account_id") or user_uid),
+                "actual_uid": str((cached_profile or {}).get("account_id") or user_uid),
+                "user_input_uid": user_uid, "nickname": prof_nick,
+                "region": prof_region, "level": prof_level, "initial_exp": prof_exp,
+                "current_exp": prof_exp, "gained_exp": 0, "likes": prof_likes,
+                "status": "PAUSED" if acc.get("paused") else ("ONLINE" if cached_profile else "OFFLINE"),
+                "is_paused": bool(acc.get("paused")), "matches_played": 0,
                 "active_matches": 0, "last_match_time": None,
                 "last_updated": time.strftime("%H:%M:%S"),
                 "added_at": acc.get("added_at", now), "owner": username,
@@ -861,9 +879,15 @@ async def api_user_remove_account(request: web.Request) -> web.Response:
                 if mapped:
                     keys.add(str(mapped))
 
+        # Cancel every task belonging to the selected account. Worker keys
+        # can be account-id, token-prefix (16/20 chars), or legacy aliases.
+        worker_aliases = set(keys)
+        if token_val:
+            worker_aliases.update({token_val[:16], token_val[:20], f"tok_{token_val[:16]}", f"tok_{token_val[:20]}"})
         workers = set()
         for wk, task in list(bot_state.account_workers.items()):
-            if str(wk) in keys:
+            wk_s = str(wk)
+            if wk_s in worker_aliases or any(alias and (wk_s.endswith(alias) or wk_s.endswith(f"::{alias}")) for alias in worker_aliases):
                 workers.add(task)
                 bot_state.account_workers.pop(wk, None)
         for task in workers:
@@ -941,21 +965,38 @@ async def api_user_pause(request: web.Request) -> web.Response:
         if not acc_id: return _json_error("account_id required")
         user = await get_user(username)
         if not user: return _json_error("User not found", 404)
-        owned = set()
+
+        selected = None
         for acc in user.get("accounts", []):
             uid = str(acc.get("uid") or "")
             tok = str(acc.get("token") or "")
-            if uid: owned.add(uid)
-            if tok: owned.update({tok[:20], f"tok_{tok[:20]}"})
-        resolved = {acc_id}
-        for k in list(resolved):
-            for mapping in (bot_state.account_token_map, bot_state.auth_to_game_id, bot_state.game_to_auth_id):
-                mapped = mapping.get(k)
-                if mapped: resolved.add(str(mapped))
-        if not resolved.intersection(owned):
+            ids = {x for x in (uid, tok[:20], f"tok_{tok[:20]}") if x}
+            resolved = set(ids)
+            for ident in list(resolved):
+                for mapping in (bot_state.account_token_map, bot_state.auth_to_game_id, bot_state.game_to_auth_id):
+                    mapped = mapping.get(ident)
+                    if mapped: resolved.add(str(mapped))
+            if acc_id in resolved:
+                selected = acc
+                break
+        if selected is None:
             return _json_error("Account not found", 404)
-        target = next((k for k in resolved if k in bot_state.accounts), acc_id)
+
+        candidates = {str(selected.get("uid") or ""), str(selected.get("token") or "")[:20],
+                      f"tok_{str(selected.get('token') or '')[:20]}", acc_id}
+        for ident in list(candidates):
+            for mapping in (bot_state.account_token_map, bot_state.auth_to_game_id, bot_state.game_to_auth_id):
+                mapped = mapping.get(ident)
+                if mapped: candidates.add(str(mapped))
+
+        target = next((k for k in candidates if k in bot_state.accounts), acc_id)
         is_paused = bot_state.toggle_pause(target)
+        await set_account_paused(username, selected, is_paused)
+
+        cb = bot_state.refresh_callbacks.get("on_user_pause_toggle")
+        if cb:
+            asyncio.create_task(cb(username, dict(selected), is_paused))
+
         return web.json_response({"status": "ok", "is_paused": is_paused})
     except Exception as e:
         return _json_error(str(e), 500)
