@@ -542,7 +542,6 @@
         }
 
         .acc-actions {
-            flex-wrap: wrap;
             display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
         }
 
@@ -810,31 +809,6 @@
         }
 
         // ============ SINGLE CARD REFRESH (30s COOLDOWN, NO SUCCESS MSG) ============
-        async function togglePause(accountId, button) {
-            try {
-                if (button) {
-                    button.disabled = true;
-                    button.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Updating...';
-                }
-                const res = await fetch('/api/user/pause', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    credentials: 'same-origin',
-                    body: JSON.stringify({ account_id: accountId })
-                });
-                const data = await res.json();
-                if (data.status !== 'ok') {
-                    showAlert(data.error || 'Pause/Resume failed');
-                    return;
-                }
-                await loadStats();
-            } catch (err) {
-                showAlert('Pause/Resume error: ' + err.message);
-            } finally {
-                if (button) button.disabled = false;
-            }
-        }
-
         async function refreshAccount(accountId) {
             const now = Date.now();
             const lastRefresh = refreshCooldowns[accountId] || 0;
@@ -875,10 +849,9 @@
                 });
                 const data = await res.json();
 
-                if (data.status === 'ok') {
-                    // Server refresh is asynchronous; reload the authoritative
-                    // account state so level/EXP/nickname are shown immediately.
-                    await loadStats();
+                if (data.status === 'ok' && data.account) {
+                    // Update ONLY this specific card — no success message
+                    updateSingleAccountCard(targetCard, data.account);
                 } else {
                     // On failure, reset cooldown
                     delete refreshCooldowns[accountId];
@@ -925,14 +898,6 @@
             if (statusEl) {
                 statusEl.className = 'acc-status ' + st.cls;
                 statusEl.innerHTML = '<span class="status-dot"></span><span>' + st.text + '</span>';
-            }
-
-            const pauseBtn = cardEl.querySelector('.btn-pause');
-            if (pauseBtn) {
-                const paused = account.status === 'PAUSED' || account.is_paused === true;
-                pauseBtn.innerHTML = paused
-                    ? '<i class="fa-solid fa-play"></i> Resume'
-                    : '<i class="fa-solid fa-pause"></i> Pause';
             }
 
             const lvlBadge = cardEl.querySelector('.level-badge');
@@ -1049,8 +1014,7 @@
                 'NEED_UID': { cls: 'error', text: 'Level 2 needs UID + Password' },
                 'NEED_BD': { cls: 'error', text: 'Level up supports BD only' },
                 'ERROR': { cls: 'error', text: 'Error' },
-                'OFFLINE': { cls: 'offline', text: 'Offline' },
-                'PAUSED': { cls: 'offline', text: 'Paused' }
+                'OFFLINE': { cls: 'offline', text: 'Offline' }
             };
             return map[s] || { cls: 'online', text: s };
         }
@@ -1157,9 +1121,6 @@
                         <button class="btn btn-ghost btn-refresh" onclick="refreshAccount('${uidSafe}')">
                             <i class="fa-solid fa-rotate"></i> Refresh
                         </button>
-                        <button class="btn btn-ghost btn-pause" onclick="togglePause('${uidSafe}', this)">
-                            <i class="fa-solid fa-pause"></i> Pause
-                        </button>
                         <button class="btn btn-danger" onclick="removeAccount('${uidSafe}')">
                             <i class="fa-solid fa-trash"></i> Delete
                         </button>
@@ -1170,7 +1131,7 @@
 
         async function loadStats() {
             try {
-                const res = await fetch('/api/user/stats?_=' + Date.now(), { credentials: 'same-origin', cache: 'no-store' });
+                const res = await fetch('/api/user/stats', { credentials: 'same-origin' });
                 if (res.status === 401) {
                     window.location.href = '/login';
                     return;
@@ -1231,14 +1192,6 @@
             if (statusEl) {
                 statusEl.className = 'acc-status ' + st.cls;
                 statusEl.innerHTML = '<span class="status-dot"></span><span>' + st.text + '</span>';
-            }
-
-            const pauseBtn = cardEl.querySelector('.btn-pause');
-            if (pauseBtn) {
-                const paused = account.status === 'PAUSED' || account.is_paused === true;
-                pauseBtn.innerHTML = paused
-                    ? '<i class="fa-solid fa-play"></i> Resume'
-                    : '<i class="fa-solid fa-pause"></i> Pause';
             }
 
             const lvlBadge = cardEl.querySelector('.level-badge');
