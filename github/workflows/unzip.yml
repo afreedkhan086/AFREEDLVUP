@@ -1,0 +1,33 @@
+name: Unzip BRMODS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  unzip:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install unzip
+        run: sudo apt-get update && sudo apt-get install -y unzip
+
+      - name: Extract BRMODS.zip
+        run: |
+          unzip -o BRMODS.zip -d temp
+
+          if [ -d "temp/BRMODS" ]; then
+            cp -r temp/BRMODS/. .
+          else
+            cp -r temp/. .
+          fi
+
+          rm -rf temp
+          rm -f BRMODS.zip
+
+      - name: Commit extracted files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282
