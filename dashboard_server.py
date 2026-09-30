@@ -10,6 +10,7 @@ import json
 import os
 import time
 import secrets
+import re
 from typing import Dict, List, Any, Optional
 
 from aiohttp import web
@@ -33,6 +34,74 @@ except Exception:
     async def is_user_expired(*a, **k): return False
     def get_admin_credentials(): return {"username": "admin", "password": "admin"}
 
+
+
+# ==================== UPI PAYMENT SYSTEM ====================
+PAYMENT_CONFIG_FILE = "payment_config.json"
+PAYMENT_REQUESTS_FILE = "payment_requests.json"
+PAYMENT_UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "payment_uploads")
+DEFAULT_PAYMENT_CONFIG = {
+    "upi_id": "yourupi@upi",
+    "qr_file": "",
+    "plans": {
+        "Starting": {"price": 99, "days": 1, "accounts": 3},
+        "Basic": {"price": 199, "days": 2, "accounts": 3},
+        "Premium": {"price": 249, "days": 3, "accounts": 4},
+        "Safe": {"price": 699, "days": 7, "accounts": 5},
+    },
+}
+
+def _payment_config():
+    cfg = dict(DEFAULT_PAYMENT_CONFIG)
+    try:
+        if os.path.exists(PAYMENT_CONFIG_FILE):
+            with open(PAYMENT_CONFIG_FILE, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            cfg["upi_id"] = str(saved.get("upi_id", cfg["upi_id"]))
+            cfg["qr_file"] = str(saved.get("qr_file", ""))
+            if isinstance(saved.get("plans"), dict):
+                for name, defaults in cfg["plans"].items():
+                    item = saved["plans"].get(name, {})
+                    if isinstance(item, dict):
+                        defaults["price"] = float(item.get("price", defaults["price"]))
+                        defaults["days"] = int(item.get("days", defaults["days"]))
+                        defaults["accounts"] = int(item.get("accounts", defaults["accounts"]))
+    except Exception:
+        pass
+    return cfg
+
+def _save_payment_config(cfg):
+    with open(PAYMENT_CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+
+def _payment_requests():
+    try:
+        if os.path.exists(PAYMENT_REQUESTS_FILE):
+            with open(PAYMENT_REQUESTS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, list) else []
+    except Exception:
+        pass
+    return []
+
+def _save_payment_requests(items):
+    with open(PAYMENT_REQUESTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(items, f, indent=2, ensure_ascii=False)
+
+def _safe_filename(name):
+    name = os.path.basename(str(name or "upload"))
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name)
+
+def _payment_public_config():
+    cfg = _payment_config()
+    plans = {}
+    for name, item in cfg["plans"].items():
+        plans[name] = {
+            "price": item["price"],
+            "days": item["days"],
+            "accounts": item["accounts"],
+        }
+    return {"upi_id": cfg["upi_id"], "qr_file": cfg["qr_file"], "plans": plans}
 
 # ==================== EXP TABLE ====================
 EXP_TABLE: Dict[int, int] = {
@@ -455,58 +524,6 @@ def load_template(name: str) -> str:
 # ==================== POPUP CONFIG ====================
 POPUP_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "popup_config.json")
 
-# ==================== INDIAN PAYMENT / STORE CONFIG ====================
-STORE_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "store_config.json")
-PAYMENT_REQUESTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "payment_requests.json")
-UPLOADS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
-DEFAULT_STORE_CONFIG = {
-    "upi_id": "yourupi@upi",
-    "payee_name": "AFREED LV UP",
-    "currency": "INR",
-    "plans": [
-        {"id": "starter", "name": "Starter", "price": 99, "account_limit": 1, "duration_value": 7, "duration_unit": "days"},
-        {"id": "pro", "name": "Pro", "price": 249, "account_limit": 3, "duration_value": 30, "duration_unit": "days"},
-        {"id": "ultra", "name": "Ultra", "price": 599, "account_limit": 10, "duration_value": 30, "duration_unit": "days"}
-    ],
-    "qr_path": ""
-}
-
-def _load_store_config():
-    if not os.path.exists(STORE_CONFIG_FILE):
-        return dict(DEFAULT_STORE_CONFIG)
-    try:
-        with open(STORE_CONFIG_FILE, "r", encoding="utf-8") as f:
-            data=json.load(f)
-        cfg=dict(DEFAULT_STORE_CONFIG)
-        if isinstance(data, dict):
-            cfg.update(data)
-        return cfg
-    except Exception:
-        return dict(DEFAULT_STORE_CONFIG)
-
-def _save_store_config(cfg):
-    os.makedirs(os.path.dirname(STORE_CONFIG_FILE), exist_ok=True)
-    tmp=STORE_CONFIG_FILE+".tmp"
-    with open(tmp,"w",encoding="utf-8") as f: json.dump(cfg,f,indent=2)
-    os.replace(tmp, STORE_CONFIG_FILE)
-
-def _load_payment_requests():
-    if not os.path.exists(PAYMENT_REQUESTS_FILE): return []
-    try:
-        with open(PAYMENT_REQUESTS_FILE,"r",encoding="utf-8") as f: data=json.load(f)
-        return data if isinstance(data,list) else []
-    except Exception: return []
-
-def _save_payment_requests(items):
-    tmp=PAYMENT_REQUESTS_FILE+".tmp"
-    with open(tmp,"w",encoding="utf-8") as f: json.dump(items,f,indent=2)
-    os.replace(tmp,PAYMENT_REQUESTS_FILE)
-
-def _safe_filename(name):
-    import re as _re
-    return _re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(name or "upload"))
-
-
 DEFAULT_POPUP = {
     "enabled": True,
     "header": "Important Update",
@@ -543,135 +560,185 @@ def _save_popup_config(cfg: Dict[str, Any]):
         print(f"[POPUP] Save error: {e}")
 
 
-# ==================== STORE / PAYMENT API ====================
-async def handle_buy_page(request: web.Request) -> web.Response:
-    return web.Response(text=load_template("buy.html"), content_type="text/html", charset="utf-8")
+# ==================== PAGE ROUTES ====================
 
-async def handle_upload(request: web.Request) -> web.StreamResponse:
+async def handle_payment_page(request: web.Request) -> web.Response:
+    return web.Response(text=load_template("payment.html"), content_type="text/html", charset="utf-8")
+
+async def handle_payment_file(request: web.Request) -> web.StreamResponse:
     name = _safe_filename(request.match_info.get("name", ""))
-    path = os.path.join(UPLOADS_DIR, name)
+    path = os.path.join(PAYMENT_UPLOAD_DIR, name)
     if not os.path.isfile(path):
         raise web.HTTPNotFound()
     return web.FileResponse(path)
 
-async def api_store_config(request: web.Request) -> web.Response:
-    cfg = _load_store_config()
-    return web.json_response({"status":"ok", "store": cfg})
+async def api_public_payment(request: web.Request) -> web.Response:
+    return web.json_response({"status": "ok", "payment": _payment_public_config()})
 
 async def api_submit_payment(request: web.Request) -> web.Response:
     try:
         reader = await request.multipart()
         fields = {}
-        screenshot = None
+        screenshot_name = ""
+        os.makedirs(PAYMENT_UPLOAD_DIR, exist_ok=True)
+
         while True:
             part = await reader.next()
-            if part is None: break
-            name = part.name or ""
-            if name == "screenshot":
-                raw = await part.read(decode=False)
-                if raw and len(raw) > 5 * 1024 * 1024:
-                    return _json_error("Screenshot must be 5 MB or smaller")
-                if raw:
-                    screenshot = raw
+            if part is None:
+                break
+            if part.name == "screenshot":
+                original = _safe_filename(part.filename or "payment.png")
+                ext = os.path.splitext(original)[1].lower()
+                if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
+                    return _json_error("Only PNG, JPG, JPEG or WEBP screenshots are allowed", 400)
+                filename = f"payment_{int(time.time())}_{secrets.token_hex(5)}{ext}"
+                target = os.path.join(PAYMENT_UPLOAD_DIR, filename)
+                size = 0
+                with open(target, "wb") as f:
+                    while True:
+                        chunk = await part.read_chunk()
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size > 5 * 1024 * 1024:
+                            f.close()
+                            try: os.remove(target)
+                            except OSError: pass
+                            return _json_error("Screenshot must be 5 MB or smaller", 400)
+                        f.write(chunk)
+                screenshot_name = filename
             else:
-                fields[name] = (await part.text()).strip()
+                fields[part.name] = (await part.text()).strip()
 
-        cfg = _load_store_config()
-        plan_id = fields.get("plan_id", "")
-        plan = next((x for x in cfg.get("plans", []) if str(x.get("id")) == plan_id), None)
-        if not plan: return _json_error("Invalid plan")
-        username = fields.get("username", "")
-        password = fields.get("password", "")
-        utr = fields.get("utr", "")
-        if len(username) < 3 or len(password) < 4:
-            return _json_error("Username/password is invalid")
-        if len(utr) < 6:
-            return _json_error("Enter the UTR / transaction reference")
-        if not screenshot:
-            return _json_error("Payment screenshot is required")
+        plan = fields.get("plan", "")
+        cfg = _payment_config()
+        if plan not in cfg["plans"]:
+            return _json_error("Invalid plan", 400)
+        if not fields.get("customer_name") or not fields.get("contact") or not fields.get("utr"):
+            return _json_error("Name, contact and UTR are required", 400)
+        if not screenshot_name:
+            return _json_error("Payment screenshot is required", 400)
 
-        os.makedirs(UPLOADS_DIR, exist_ok=True)
-        req_id = secrets.token_hex(6).upper()
-        shot_name = f"payment_{req_id}.bin"
-        with open(os.path.join(UPLOADS_DIR, shot_name), "wb") as f: f.write(screenshot)
-        items = _load_payment_requests()
-        items.insert(0, {
-            "id": req_id, "created_at": time.time(), "status": "pending",
-            "plan_id": plan_id, "plan_name": plan.get("name", plan_id),
-            "price": float(plan.get("price", 0)), "account_limit": int(plan.get("account_limit", 1)),
-            "duration_value": int(plan.get("duration_value", 1)), "duration_unit": plan.get("duration_unit", "days"),
-            "username": username, "password": password, "utr": utr,
-            "screenshot": "/uploads/" + shot_name, "admin_note": ""
-        })
+        item = cfg["plans"][plan]
+        req = {
+            "id": secrets.token_hex(8),
+            "created_at": int(time.time()),
+            "customer_name": fields["customer_name"][:100],
+            "contact": fields["contact"][:100],
+            "utr": fields["utr"][:100],
+            "plan": plan,
+            "amount": item["price"],
+            "screenshot": screenshot_name,
+            "status": "pending",
+            "active": True,
+        }
+        items = _payment_requests()
+        items.insert(0, req)
         _save_payment_requests(items)
-        return web.json_response({"status":"ok", "request_id": req_id, "message":"Payment request submitted. Admin verification pending."})
+        return web.json_response({"status": "ok", "request_id": req["id"], "message": "Payment request submitted. Admin verification is required."})
     except Exception as e:
         return _json_error(str(e), 500)
 
-async def api_admin_store_config(request: web.Request) -> web.Response:
+async def api_admin_payment_settings(request: web.Request) -> web.Response:
+    err = await _require_admin(request)
+    if err: return err
+    return web.json_response({"status": "ok", "payment": _payment_public_config()})
+
+async def api_admin_save_payment_settings(request: web.Request) -> web.Response:
     err = await _require_admin(request)
     if err: return err
     try:
         data = await request.json()
-        cfg = _load_store_config()
-        cfg["upi_id"] = str(data.get("upi_id", cfg.get("upi_id", ""))).strip()
-        cfg["payee_name"] = str(data.get("payee_name", cfg.get("payee_name", ""))).strip()
-        plans = data.get("plans")
-        if isinstance(plans, list):
-            clean=[]
-            for i,p in enumerate(plans):
-                if not isinstance(p,dict): continue
-                try:
-                    price=float(p.get("price",0)); limit=int(p.get("account_limit",1)); dur=int(p.get("duration_value",1))
-                except Exception: continue
-                if price < 0 or limit < 1 or dur < 1: continue
-                unit=str(p.get("duration_unit","days"))
-                if unit not in ("minutes","hours","days"): unit="days"
-                clean.append({"id":str(p.get("id") or f"plan{i+1}"),"name":str(p.get("name") or f"Plan {i+1}"),"price":price,"account_limit":limit,"duration_value":dur,"duration_unit":unit})
-            if clean: cfg["plans"]=clean
-        _save_store_config(cfg)
-        return web.json_response({"status":"ok","store":cfg})
-    except Exception as e: return _json_error(str(e),500)
+        cfg = _payment_config()
+        cfg["upi_id"] = str(data.get("upi_id", cfg["upi_id"])).strip()[:120]
+        plans = data.get("plans", {})
+        for name in cfg["plans"]:
+            item = plans.get(name, {}) if isinstance(plans, dict) else {}
+            if "price" in item:
+                price = float(item["price"])
+                if price < 0 or price > 1000000:
+                    raise ValueError("Invalid plan price")
+                cfg["plans"][name]["price"] = price
+            if "days" in item:
+                cfg["plans"][name]["days"] = max(1, int(item["days"]))
+            if "accounts" in item:
+                cfg["plans"][name]["accounts"] = max(1, int(item["accounts"]))
+        _save_payment_config(cfg)
+        return web.json_response({"status": "ok", "payment": _payment_public_config()})
+    except Exception as e:
+        return _json_error(str(e), 400)
 
 async def api_admin_upload_qr(request: web.Request) -> web.Response:
     err = await _require_admin(request)
     if err: return err
     try:
-        reader=await request.multipart(); part=await reader.next()
-        if not part or part.name != "qr": return _json_error("QR image required")
-        raw=await part.read(decode=False)
-        if not raw or len(raw)>2*1024*1024: return _json_error("QR image must be 2 MB or smaller")
-        os.makedirs(UPLOADS_DIR,exist_ok=True)
-        name=f"upi_qr_{int(time.time())}.png"
-        with open(os.path.join(UPLOADS_DIR,name),"wb") as f: f.write(raw)
-        cfg=_load_store_config(); cfg["qr_path"]="/uploads/"+name; _save_store_config(cfg)
-        return web.json_response({"status":"ok","qr_path":cfg["qr_path"]})
-    except Exception as e: return _json_error(str(e),500)
+        reader = await request.multipart()
+        part = await reader.next()
+        if not part or part.name != "qr":
+            return _json_error("QR image is required", 400)
+        ext = os.path.splitext(_safe_filename(part.filename or "qr.png"))[1].lower()
+        if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
+            return _json_error("Only PNG, JPG, JPEG or WEBP QR images are allowed", 400)
+        os.makedirs(PAYMENT_UPLOAD_DIR, exist_ok=True)
+        filename = f"upi_qr{ext}"
+        target = os.path.join(PAYMENT_UPLOAD_DIR, filename)
+        size = 0
+        with open(target, "wb") as f:
+            while True:
+                chunk = await part.read_chunk()
+                if not chunk: break
+                size += len(chunk)
+                if size > 3 * 1024 * 1024:
+                    f.close()
+                    try: os.remove(target)
+                    except OSError: pass
+                    return _json_error("QR image must be 3 MB or smaller", 400)
+                f.write(chunk)
+        cfg = _payment_config()
+        cfg["qr_file"] = filename
+        _save_payment_config(cfg)
+        return web.json_response({"status": "ok", "qr_file": filename})
+    except Exception as e:
+        return _json_error(str(e), 500)
 
 async def api_admin_payment_requests(request: web.Request) -> web.Response:
-    err=await _require_admin(request)
+    err = await _require_admin(request)
     if err: return err
-    return web.json_response({"status":"ok","requests":_load_payment_requests()})
+    return web.json_response({"status": "ok", "requests": _payment_requests()})
 
-async def api_admin_payment_decision(request: web.Request) -> web.Response:
-    err=await _require_admin(request)
+async def api_admin_payment_action(request: web.Request) -> web.Response:
+    err = await _require_admin(request)
     if err: return err
     try:
-        data=await request.json(); req_id=str(data.get("request_id","")).strip(); decision=str(data.get("decision","")).lower(); note=str(data.get("note","")).strip()
-        if decision not in ("approve","reject"): return _json_error("Invalid decision")
-        items=_load_payment_requests(); item=next((x for x in items if x.get("id")==req_id),None)
-        if not item: return _json_error("Payment request not found",404)
-        if item.get("status") != "pending": return _json_error("Request already processed")
-        if decision=="reject":
-            item["status"]="rejected"; item["admin_note"]=note or "Payment not verified"; _save_payment_requests(items)
-            return web.json_response({"status":"ok","decision":"rejected"})
-        result=await create_user(item["username"],item["password"],item["account_limit"],item["duration_value"],item["duration_unit"])
-        if "error" in result: return _json_error(result["error"])
-        item["status"]="approved"; item["admin_note"]=note or "Payment verified"; item["approved_at"]=time.time(); _save_payment_requests(items)
-        return web.json_response({"status":"ok","decision":"approved","username":item["username"]})
-    except Exception as e: return _json_error(str(e),500)
+        data = await request.json()
+        req_id = str(data.get("id", ""))
+        action = str(data.get("action", "")).lower()
+        items = _payment_requests()
+        found = None
+        for item in items:
+            if item.get("id") == req_id:
+                found = item
+                break
+        if not found:
+            return _json_error("Payment request not found", 404)
+        if action == "verify":
+            found["status"] = "verified"
+            found["verified_at"] = int(time.time())
+            found["active"] = True
+        elif action == "reject":
+            found["status"] = "rejected"
+            found["active"] = False
+        elif action == "activate":
+            found["active"] = True
+        elif action == "deactivate":
+            found["active"] = False
+        else:
+            return _json_error("Invalid action", 400)
+        _save_payment_requests(items)
+        return web.json_response({"status": "ok", "request": found})
+    except Exception as e:
+        return _json_error(str(e), 400)
 
-# ==================== PAGE ROUTES ====================
 async def handle_root(request: web.Request) -> web.Response:
     return web.Response(text=load_template("landing.html"), content_type="text/html", charset="utf-8")
 
@@ -856,23 +923,21 @@ async def _require_user(request: web.Request) -> Optional[web.Response]:
 def _build_user_accounts(username: str, user: Dict[str, Any]) -> List[Dict[str, Any]]:
     now = time.time()
     result_accounts = []
+
     for acc in user.get("accounts", []):
         user_uid = str(acc.get("uid") or acc.get("token", "")[:20])
         user_token_prefix = str(acc.get("token", ""))[:20] if acc.get("token") else ""
         merged = None
-        candidates = {user_uid}
-        if user_token_prefix:
-            candidates.update({user_token_prefix, f"tok_{user_token_prefix}"})
-        for c in list(candidates):
-            for mapping in (bot_state.account_token_map, bot_state.auth_to_game_id, bot_state.game_to_auth_id):
-                mapped = mapping.get(c)
-                if mapped:
-                    candidates.add(str(mapped))
+
         for bot_uid, bot_acc in bot_state.accounts.items():
+            if bot_acc.get("owner") != username:
+                continue
             bot_uid_str = str(bot_uid)
             bot_actual = str(bot_acc.get("actual_uid", ""))
             bot_display = str(bot_acc.get("display_uid", ""))
-            if bot_uid_str in candidates or bot_actual in candidates or bot_display in candidates:
+            if (bot_uid_str == user_uid or bot_actual == user_uid or
+                    bot_display == user_uid or
+                    (user_token_prefix and bot_uid_str == user_token_prefix)):
                 merged = dict(bot_acc)
                 real_uid = bot_actual or bot_uid_str
                 merged["uid"] = real_uid
@@ -881,34 +946,28 @@ def _build_user_accounts(username: str, user: Dict[str, Any]) -> List[Dict[str, 
                 merged["user_input_uid"] = user_uid
                 merged["added_at"] = acc.get("added_at", bot_acc.get("added_at", now))
                 break
+
         if merged is None:
-            # The worker may have logged in successfully while the dashboard
-            # mapping has not caught up yet. Use the safe profile fields from
-            # the credential cache instead of showing a fake CONNECTING/level-1.
-            cached_profile = None
-            for c in list(candidates):
-                cred = bot_state.account_credentials.get(c)
-                if cred:
-                    cached_profile = cred
-                    break
-            prof_level = int((cached_profile or {}).get("level") or 1)
-            prof_exp = int((cached_profile or {}).get("exp") or 0)
-            prof_nick = (cached_profile or {}).get("nickname") or f"Player_{user_uid[:6]}"
-            prof_region = (cached_profile or {}).get("region") or "BD"
-            prof_likes = int((cached_profile or {}).get("likes") or 0)
-            prog = calculate_level_progress(prof_level, prof_exp)
+            prog = calculate_level_progress(1, 0)
             merged = {
-                "uid": str((cached_profile or {}).get("account_id") or user_uid),
-                "display_uid": str((cached_profile or {}).get("account_id") or user_uid),
-                "actual_uid": str((cached_profile or {}).get("account_id") or user_uid),
-                "user_input_uid": user_uid, "nickname": prof_nick,
-                "region": prof_region, "level": prof_level, "initial_exp": prof_exp,
-                "current_exp": prof_exp, "gained_exp": 0, "likes": prof_likes,
-                "status": "PAUSED" if acc.get("paused") else ("ONLINE" if cached_profile else "OFFLINE"),
-                "is_paused": bool(acc.get("paused")), "matches_played": 0,
-                "active_matches": 0, "last_match_time": None,
+                "uid": user_uid,
+                "display_uid": user_uid,
+                "actual_uid": user_uid,
+                "user_input_uid": user_uid,
+                "nickname": f"Player_{user_uid[:6]}",
+                "region": "BD",
+                "level": 1,
+                "initial_exp": 0,
+                "current_exp": 0,
+                "gained_exp": 0,
+                "likes": 0,
+                "status": "CONNECTING",
+                "matches_played": 0,
+                "active_matches": 0,
+                "last_match_time": None,
                 "last_updated": time.strftime("%H:%M:%S"),
-                "added_at": acc.get("added_at", now), "owner": username,
+                "added_at": acc.get("added_at", now),
+                "owner": username,
                 **{k: prog[k] for k in ("next_level", "remaining_exp", "target_exp",
                                         "needed_for_level", "earned_in_level", "progress_pct")},
             }
@@ -938,8 +997,9 @@ async def api_user_stats(request: web.Request) -> web.Response:
             for check_key in [real_uid, user_input_uid, str(acc.get("uid", ""))]:
                 if check_key and check_key in bot_state.accounts:
                     cand = bot_state.accounts[check_key]
-                    if fresh is None or cand.get("current_exp", 0) > fresh.get("current_exp", 0):
-                        fresh = cand
+                    if cand.get("owner") == username:
+                        if fresh is None or cand.get("current_exp", 0) > fresh.get("current_exp", 0):
+                            fresh = cand
             if fresh:
                 for k in ("current_exp", "gained_exp", "level", "nickname", "region",
                           "status", "matches_played", "active_matches", "last_updated",
@@ -1011,73 +1071,48 @@ async def api_user_remove_account(request: web.Request) -> web.Response:
         acc_id = str(data.get("account_id", "")).strip()
         if not acc_id:
             return _json_error("account_id required")
+
         user = await get_user(username)
         if not user:
-            return _json_error("User not found", 404)
+            return _json_error("User not found")
 
-        # Resolve only the selected stored account; never build keys from all
-        # user accounts, otherwise deleting one account could remove others.
-        selected = None
+        keys = {acc_id}
         for acc in user.get("accounts", []):
             uid_val = str(acc.get("uid") or "")
             token_val = str(acc.get("token") or "")
-            identifiers = {x for x in (uid_val, token_val[:20], f"tok_{token_val[:20]}") if x}
-            if acc_id in identifiers:
-                selected = acc
-                break
+            keys.add(uid_val)
+            if token_val:
+                keys.add(token_val[:20])
+                keys.add(f"tok_{token_val[:20]}")
 
-        # If the UI supplied the real game UID, resolve it through bot maps.
-        if selected is None:
-            for acc in user.get("accounts", []):
-                uid_val = str(acc.get("uid") or "")
-                token_val = str(acc.get("token") or "")
-                identifiers = {x for x in (uid_val, token_val[:20], f"tok_{token_val[:20]}") if x}
-                resolved = set(identifiers)
-                for ident in list(resolved):
-                    for mapping in (bot_state.account_token_map, bot_state.auth_to_game_id, bot_state.game_to_auth_id):
-                        mapped = mapping.get(ident)
-                        if mapped:
-                            resolved.add(str(mapped))
-                if acc_id in resolved:
-                    selected = acc
-                    break
+        for bot_uid, ba in bot_state.accounts.items():
+            if ba.get("owner") != username:
+                continue
+            for check_id in [str(bot_uid), str(ba.get("actual_uid", "")),
+                             str(ba.get("display_uid", "")), str(ba.get("uid", ""))]:
+                if check_id and check_id == acc_id:
+                    keys.update([str(bot_uid), str(ba.get("actual_uid", "")),
+                                 str(ba.get("display_uid", "")), str(ba.get("uid", ""))])
 
-        if selected is None:
-            return _json_error("Account not found", 404)
-
-        uid_val = str(selected.get("uid") or "")
-        token_val = str(selected.get("token") or "")
-        primary = uid_val or token_val[:20]
-        result = await remove_account_from_user(username, primary)
-        if "status" not in result:
-            return _json_error(result.get("error", "Account not found"), 404)
-
-        keys = {x for x in (primary, acc_id, token_val[:20], f"tok_{token_val[:20]}") if x}
+        removed = False
         for k in list(keys):
-            for mapping in (bot_state.account_token_map, bot_state.auth_to_game_id, bot_state.game_to_auth_id):
-                mapped = mapping.get(k)
-                if mapped:
-                    keys.add(str(mapped))
-
-        # Cancel every task belonging to the selected account. Worker keys
-        # can be account-id, token-prefix (16/20 chars), or legacy aliases.
-        worker_aliases = set(keys)
-        if token_val:
-            worker_aliases.update({token_val[:16], token_val[:20], f"tok_{token_val[:16]}", f"tok_{token_val[:20]}"})
-        workers = set()
-        for wk, task in list(bot_state.account_workers.items()):
-            wk_s = str(wk)
-            if wk_s in worker_aliases or any(alias and (wk_s.endswith(alias) or wk_s.endswith(f"::{alias}")) for alias in worker_aliases):
-                workers.add(task)
-                bot_state.account_workers.pop(wk, None)
-        for task in workers:
-            try:
-                task.cancel()
-            except Exception:
-                pass
+            if not k:
+                continue
+            r = await remove_account_from_user(username, k)
+            if "status" in r:
+                removed = True
+                break
+        if not removed:
+            return _json_error("Account not found")
 
         for k in keys:
-            bot_state.close_writers_for_account(k)
+            if not k:
+                continue
+            worker_key = f"{username}::{k}"
+            if worker_key in bot_state.account_workers:
+                try: bot_state.account_workers[worker_key].cancel()
+                except Exception: pass
+                bot_state.account_workers.pop(worker_key, None)
             bot_state.accounts.pop(k, None)
             bot_state.account_credentials.pop(k, None)
             bot_state.account_credentials.pop(f"tok_{k}", None)
@@ -1134,54 +1169,6 @@ async def api_user_refresh(request: web.Request) -> web.Response:
         return _json_error(str(e), 500)
 
 
-async def api_user_pause(request: web.Request) -> web.Response:
-    err = await _require_user(request)
-    if err: return err
-    try:
-        sess = await get_session(_get_sid(request))
-        username = sess["username"]
-        data = await request.json()
-        acc_id = str(data.get("account_id", "")).strip()
-        if not acc_id: return _json_error("account_id required")
-        user = await get_user(username)
-        if not user: return _json_error("User not found", 404)
-
-        selected = None
-        for acc in user.get("accounts", []):
-            uid = str(acc.get("uid") or "")
-            tok = str(acc.get("token") or "")
-            ids = {x for x in (uid, tok[:20], f"tok_{tok[:20]}") if x}
-            resolved = set(ids)
-            for ident in list(resolved):
-                for mapping in (bot_state.account_token_map, bot_state.auth_to_game_id, bot_state.game_to_auth_id):
-                    mapped = mapping.get(ident)
-                    if mapped: resolved.add(str(mapped))
-            if acc_id in resolved:
-                selected = acc
-                break
-        if selected is None:
-            return _json_error("Account not found", 404)
-
-        candidates = {str(selected.get("uid") or ""), str(selected.get("token") or "")[:20],
-                      f"tok_{str(selected.get('token') or '')[:20]}", acc_id}
-        for ident in list(candidates):
-            for mapping in (bot_state.account_token_map, bot_state.auth_to_game_id, bot_state.game_to_auth_id):
-                mapped = mapping.get(ident)
-                if mapped: candidates.add(str(mapped))
-
-        target = next((k for k in candidates if k in bot_state.accounts), acc_id)
-        is_paused = bot_state.toggle_pause(target)
-        await set_account_paused(username, selected, is_paused)
-
-        cb = bot_state.refresh_callbacks.get("on_user_pause_toggle")
-        if cb:
-            asyncio.create_task(cb(username, dict(selected), is_paused))
-
-        return web.json_response({"status": "ok", "is_paused": is_paused})
-    except Exception as e:
-        return _json_error(str(e), 500)
-
-
 # ==================== PUBLIC API ====================
 async def api_public_popup(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "popup": _load_popup_config()})
@@ -1206,12 +1193,19 @@ async def api_public_stats(request: web.Request) -> web.Response:
 
 # ==================== SERVER START ====================
 async def start_web_dashboard(host: str = "0.0.0.0", port: int = 20331):
-    app = web.Application(client_max_size=8 * 1024 * 1024)
+    app = web.Application(client_max_size=4 * 1024 * 1024)
 
     # pages
     app.router.add_get("/", handle_root)
-    app.router.add_get("/buy", handle_buy_page)
-    app.router.add_get("/uploads/{name}", handle_upload)
+    app.router.add_get("/payment", handle_payment_page)
+    app.router.add_get("/payment-files/{name}", handle_payment_file)
+    app.router.add_get("/api/public/payment", api_public_payment)
+    app.router.add_post("/api/payment/submit", api_submit_payment)
+    app.router.add_get("/api/admin/payment-settings", api_admin_payment_settings)
+    app.router.add_post("/api/admin/payment-settings", api_admin_save_payment_settings)
+    app.router.add_post("/api/admin/payment-qr", api_admin_upload_qr)
+    app.router.add_get("/api/admin/payment-requests", api_admin_payment_requests)
+    app.router.add_post("/api/admin/payment-action", api_admin_payment_action)
     app.router.add_get("/login", handle_login_page)
     app.router.add_get("/admin-login", handle_admin_login_page)
     app.router.add_get("/admin", handle_admin_page)
@@ -1229,20 +1223,12 @@ async def start_web_dashboard(host: str = "0.0.0.0", port: int = 20331):
     app.router.add_post("/api/admin/extend-user", api_admin_extend_user)
     app.router.add_get("/api/admin/get-popup", api_admin_get_popup)
     app.router.add_post("/api/admin/save-popup", api_admin_save_popup)
-    app.router.add_get("/api/store", api_store_config)
-    app.router.add_post("/api/store/submit", api_submit_payment)
-    app.router.add_get("/api/admin/store", api_admin_store_config)
-    app.router.add_post("/api/admin/store", api_admin_store_config)
-    app.router.add_post("/api/admin/store/qr", api_admin_upload_qr)
-    app.router.add_get("/api/admin/payment-requests", api_admin_payment_requests)
-    app.router.add_post("/api/admin/payment-decision", api_admin_payment_decision)
 
     # user
     app.router.add_get("/api/user/stats", api_user_stats)
     app.router.add_post("/api/user/add-account", api_user_add_account)
     app.router.add_post("/api/user/remove-account", api_user_remove_account)
     app.router.add_post("/api/user/refresh", api_user_refresh)
-    app.router.add_post("/api/user/pause", api_user_pause)
 
     # public
     app.router.add_get("/api/public/popup", api_public_popup)
