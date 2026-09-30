@@ -542,6 +542,7 @@
         }
 
         .acc-actions {
+            flex-wrap: wrap;
             display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
         }
 
@@ -1169,7 +1170,7 @@
 
         async function loadStats() {
             try {
-                const res = await fetch('/api/user/stats', { credentials: 'same-origin' });
+                const res = await fetch('/api/user/stats?_=' + Date.now(), { credentials: 'same-origin', cache: 'no-store' });
                 if (res.status === 401) {
                     window.location.href = '/login';
                     return;
