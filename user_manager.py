@@ -238,6 +238,25 @@ async def remove_account_from_user(username: str, account_identifier: str) -> Di
         return {"status": "ok", "accounts": new_accounts}
 
 
+async def set_account_paused(username: str, account_identifier_or_account: Any, paused: bool) -> Dict[str, Any]:
+    """Persist the pause state for one stored user account."""
+    async with _users_lock:
+        users = _load_users()
+        username = str(username).strip()
+        if username not in users:
+            return {"error": "User not found"}
+        user = users[username]
+        target = account_identifier_or_account if isinstance(account_identifier_or_account, dict) else None
+        identifier = str(account_identifier_or_account if target is None else (target.get("uid") or target.get("token", "")[:20]))
+        for acc in user.get("accounts", []):
+            ids = {str(acc.get("uid") or ""), str(acc.get("token") or "")[:20], f"tok_{str(acc.get('token') or '')[:20]}"}
+            if target is acc or identifier in ids:
+                acc["paused"] = bool(paused)
+                _save_users(users)
+                return {"status": "ok", "paused": bool(paused)}
+        return {"error": "Account not found"}
+
+
 async def list_all_users() -> List[Dict[str, Any]]:
     async with _users_lock:
         users = _load_users()
