@@ -11,6 +11,7 @@ import os
 import time
 import secrets
 import re
+import copy
 from typing import Dict, List, Any, Optional
 
 from aiohttp import web
@@ -37,8 +38,8 @@ except Exception:
 
 
 # ==================== UPI PAYMENT SYSTEM ====================
-PAYMENT_CONFIG_FILE = "payment_config.json"
-PAYMENT_REQUESTS_FILE = "payment_requests.json"
+PAYMENT_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "payment_config.json")
+PAYMENT_REQUESTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "payment_requests.json")
 PAYMENT_UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "payment_uploads")
 DEFAULT_PAYMENT_CONFIG = {
     "upi_id": "yourupi@upi",
@@ -52,7 +53,7 @@ DEFAULT_PAYMENT_CONFIG = {
 }
 
 def _payment_config():
-    cfg = dict(DEFAULT_PAYMENT_CONFIG)
+    cfg = copy.deepcopy(DEFAULT_PAYMENT_CONFIG)
     try:
         if os.path.exists(PAYMENT_CONFIG_FILE):
             with open(PAYMENT_CONFIG_FILE, "r", encoding="utf-8") as f:
