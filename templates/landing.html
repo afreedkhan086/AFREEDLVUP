@@ -657,7 +657,7 @@
                         <span class="old-price">$2</span>
                         <span class="deal-tag">Deal</span>
                         <span class="price-amount">
-                            <span class="unit">₹</span><span class="value">1</span>
+                            <span class="unit">₹</span><span class="value" data-plan-price="Starting">1</span>
                         </span>
                     </div>
                     <ul class="feature-list">
@@ -684,7 +684,7 @@
                         <span class="old-price">$4</span>
                         <span class="deal-tag">Deal</span>
                         <span class="price-amount">
-                            <span class="unit">₹</span><span class="value">2</span>
+                            <span class="unit">₹</span><span class="value" data-plan-price="Basic">2</span>
                         </span>
                     </div>
                     <ul class="feature-list">
@@ -710,7 +710,7 @@
                         <span class="old-price">$6</span>
                         <span class="deal-tag">Deal</span>
                         <span class="price-amount">
-                            <span class="unit">₹</span><span class="value">2.5</span>
+                            <span class="unit">₹</span><span class="value" data-plan-price="Premium">2.5</span>
                         </span>
                     </div>
                     <ul class="feature-list">
@@ -736,7 +736,7 @@
                         <span class="old-price">$10</span>
                         <span class="deal-tag">Deal</span>
                         <span class="price-amount">
-                            <span class="unit">₹</span><span class="value">7</span>
+                            <span class="unit">₹</span><span class="value" data-plan-price="Safe">7</span>
                         </span>
                     </div>
                     <ul class="feature-list">
@@ -784,7 +784,7 @@
 
         async function fetchPopupConfig() {
             try {
-                const res = await fetch('/api/public/popup');
+                const res = await fetch('/api/public/popup', { cache: 'no-store' });
                 const data = await res.json();
                 if (data.status === 'ok' && data.popup && data.popup.enabled) {
                     popupConfig = data.popup;
@@ -826,28 +826,36 @@
             if (popupConfig) {
                 document.getElementById('popup-overlay').classList.add('active');
             } else {
+                fetchPopupConfig();
+            }
+        }
+
+        // Prices are loaded from the same admin-managed payment_config.json.
+        // This replaces the hardcoded values without changing the existing theme.
         async function loadPaymentPrices() {
             try {
-                const res = await fetch('/api/public/payment');
+                const res = await fetch('/api/public/payment?_=' + Date.now(), { cache: 'no-store' });
                 const data = await res.json();
-                if (!data || data.status !== 'ok') return;
-                const cards = document.querySelectorAll('.price-card');
-                cards.forEach(card => {
-                    const name = card.querySelector('.plan-name')?.innerText?.trim();
-                    const item = data.payment?.plans?.[name];
-                    if (!item) return;
-                    const value = card.querySelector('.price-amount .value');
-                    if (value) value.textContent = Number(item.price).toLocaleString('en-IN');
+                if (!data || data.status !== 'ok' || !data.payment || !data.payment.plans) return;
+
+                document.querySelectorAll('.price-card').forEach(card => {
+                    const value = card.querySelector('.price-amount .value[data-plan-price]');
+                    const name = value?.getAttribute('data-plan-price') || card.querySelector('.plan-name')?.textContent?.trim();
+                    const item = data.payment.plans[name];
+                    if (!item || !value) return;
+
+                    if (value) {
+                        const price = Number(item.price);
+                        value.textContent = Number.isFinite(price)
+                            ? price.toLocaleString('en-IN', { maximumFractionDigits: 2 })
+                            : item.price;
+                    }
+
                     const old = card.querySelector('.old-price');
                     if (old) old.style.display = 'none';
                 });
             } catch (e) {
                 console.error('Payment price fetch error:', e);
-            }
-        }
-
-        loadPaymentPrices();
-                fetchPopupConfig();
             }
         }
 
@@ -863,28 +871,11 @@
             window.location.href = '/payment?plan=' + encodeURIComponent(planName);
         }
 
-async function loadPaymentPrices() {
-            try {
-                const res = await fetch('/api/public/payment');
-                const data = await res.json();
-                if (!data || data.status !== 'ok') return;
-                const cards = document.querySelectorAll('.price-card');
-                cards.forEach(card => {
-                    const name = card.querySelector('.plan-name')?.innerText?.trim();
-                    const item = data.payment?.plans?.[name];
-                    if (!item) return;
-                    const value = card.querySelector('.price-amount .value');
-                    if (value) value.textContent = Number(item.price).toLocaleString('en-IN');
-                    const old = card.querySelector('.old-price');
-                    if (old) old.style.display = 'none';
-                });
-            } catch (e) {
-                console.error('Payment price fetch error:', e);
-            }
-        }
-
-        loadPaymentPrices();
-                fetchPopupConfig();
+        // Load both admin-controlled popup and prices after the page is ready.
+        document.addEventListener('DOMContentLoaded', () => {
+            fetchPopupConfig();
+            loadPaymentPrices();
+        });
     </script>
 </body>
 </html>
