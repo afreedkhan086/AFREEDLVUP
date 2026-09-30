@@ -741,7 +741,37 @@ async def api_admin_payment_action(request: web.Request) -> web.Response:
         return _json_error(str(e), 400)
 
 async def handle_root(request: web.Request) -> web.Response:
-    return web.Response(text=load_template("landing.html"), content_type="text/html", charset="utf-8")
+    # Render the landing-page prices from the same admin-managed payment config.
+    # This makes the displayed card prices update even when browser JS/cache is stale.
+    html = load_template("landing.html")
+    try:
+        plans = _payment_config().get("plans", {})
+        for plan_name in ("Starting", "Basic", "Premium", "Safe"):
+            item = plans.get(plan_name, {})
+            price = item.get("price", "")
+            try:
+                price_text = f"{float(price):g}"
+            except Exception:
+                price_text = str(price)
+            html = html.replace(
+                f'data-plan-price="{plan_name}">{plan_name}',
+                f'data-plan-price="{plan_name}">{plan_name}'
+            )
+            marker = f'data-plan-price="{plan_name}">'
+            pos = html.find(marker)
+            if pos != -1:
+                start = pos + len(marker)
+                end = html.find('</span>', start)
+                if end != -1:
+                    html = html[:start] + price_text + html[end:]
+    except Exception:
+        pass
+    return web.Response(
+        text=html,
+        content_type="text/html",
+        charset="utf-8",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"}
+    )
 
 
 async def handle_login_page(request: web.Request) -> web.Response:
