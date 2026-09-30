@@ -2165,6 +2165,10 @@ async def account_loop_guest(uid: str, password: str):
     acc_id = None
     while True:
         try:
+            if bot_state.is_paused(uid_str):
+                bot_state.update_status(uid_str, "PAUSED", 0)
+                await asyncio.sleep(1)
+                continue
             print_info(f"[LOGIN] Starting login for Guest UID: {uid_str}...")
             try:
                 bot_state.update_status(uid_str, "CONNECTING")
@@ -2207,6 +2211,10 @@ async def account_loop_token(token: str):
     tok_key = token[:16]
     while True:
         try:
+            if bot_state.is_paused(tok_key):
+                bot_state.update_status(tok_key, "PAUSED", 0)
+                await asyncio.sleep(1)
+                continue
             account_data = await process_account_token(token)
             if not account_data:
                 await asyncio.sleep(15)
@@ -2309,14 +2317,57 @@ async def main():
         sync_devices_with_accounts()
 
     async def on_pause_toggle_handler(uid, is_paused):
+        # Legacy callback: close active sockets immediately when paused.
         if is_paused:
             bot_state.close_writers_for_account(str(uid))
+
+    async def on_user_pause_toggle_handler(username, account, is_paused):
+        """Actually stop/resume the worker behind the dashboard Pause button."""
+        uid = str(account.get("uid") or "")
+        token = str(account.get("token") or "")
+        password = str(account.get("password") or "")
+        aliases = {x for x in (uid, token[:16], token[:20], f"tok_{token[:16]}", f"tok_{token[:20]}") if x}
+        for k, mapped in list(bot_state.account_token_map.items()):
+            if str(k) in aliases or str(mapped) in aliases:
+                aliases.update({str(k), str(mapped)})
+
+        if is_paused:
+            tasks = set()
+            for wk, task in list(bot_state.account_workers.items()):
+                wk_s = str(wk)
+                if wk_s in aliases or any(a and (wk_s.endswith(a) or wk_s.endswith(f"::{a}")) for a in aliases):
+                    tasks.add(task)
+                    bot_state.account_workers.pop(wk, None)
+            for task in tasks:
+                try: task.cancel()
+                except Exception: pass
+            bot_state.close_writers_for_account(uid)
+            print_warning(f"[PAUSE] {username}: account worker stopped")
+            return
+
+        # Resume from the exact credentials stored for this dashboard account.
+        if token:
+            key = token[:16]
+            existing = bot_state.account_workers.get(key)
+            if existing and not existing.done():
+                return
+            task = asyncio.create_task(account_loop_token(token))
+            bot_state.account_workers[key] = task
+            print_success(f"[RESUME] {username}: token worker restarted")
+        elif uid and password:
+            existing = bot_state.account_workers.get(uid)
+            if existing and not existing.done():
+                return
+            task = asyncio.create_task(account_loop_guest(uid, password))
+            bot_state.account_workers[uid] = task
+            print_success(f"[RESUME] {username}: guest worker restarted")
 
     bot_state.refresh_callbacks["on_account_added"] = on_account_added_handler
     bot_state.refresh_callbacks["on_account_deleted"] = on_account_deleted_handler
     bot_state.refresh_callbacks["on_refresh_account"] = on_refresh_account_handler
     bot_state.refresh_callbacks["on_restart_account"] = on_restart_account_handler
     bot_state.refresh_callbacks["on_pause_toggle"] = on_pause_toggle_handler
+    bot_state.refresh_callbacks["on_user_pause_toggle"] = on_user_pause_toggle_handler
 
     sync_devices_with_accounts()
 
